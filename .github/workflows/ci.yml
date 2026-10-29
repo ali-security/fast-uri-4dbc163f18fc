@@ -1,18 +1,7 @@
 name: CI
 
 on:
-  push:
-    branches:
-     - main
-     - next
-     - 'v*'
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
-  pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
+  workflow_dispatch:
 
 # This allows a subsequently queued workflow run to interrupt previous runs
 concurrency:
@@ -26,6 +15,7 @@ jobs:
   test-regression-check-node10:
     name: Test compatibility with Node.js 10
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -52,14 +42,19 @@ jobs:
           cp ./index.js ./node_modules/fast-uri/index.js
 
       - name: Run tests
+        # The repo .npmrc sets ignore-scripts=true, and npm 6 (bundled with
+        # Node.js 10) applies that to directly-invoked `npm run` scripts too, so
+        # `npm run test:unit` exits 0 without running a single test. Invoke the
+        # tape binary directly so the real suite executes.
         run: |
-          npm run test:unit
+          node ./node_modules/.bin/tape test/*.js
         env:
           NODE_OPTIONS: no-network-family-autoselection
 
   test-browser:
     name: Test browser compatibility
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -93,14 +88,64 @@ jobs:
         run: |
           npm run test:browser:${{ matrix.browser }}
 
+  # Inlined from fastify/workflows/.github/workflows/plugins-ci.yml@v6: a
+  # `uses:` job cannot carry `timeout-minutes`, so it is un-dispatchable. This
+  # reproduces that reusable workflow's own `test` job over the same
+  # node-versions matrix. The caller's `license-check` / `lint` inputs are
+  # quality gates rather than tests and are dropped, along with the
+  # write permissions a fork does not have.
   test:
+    name: Test
     needs:
       - test-regression-check-node10
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     permissions:
-      contents: write
-      pull-requests: write
-    uses: fastify/workflows/.github/workflows/plugins-ci.yml@v6
-    with:
-      license-check: true
-      lint: true
-      node-versions: '["16", "18", "20", "22", "24"]'
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node-version: ['16', '18', '20', '22', '24']
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install
+        run: npm install --ignore-scripts
+
+      - name: Run tests
+        run: npm test
+
+  pack:
+    name: Pack npm tarball
+    needs:
+      - test
+      - test-browser
+      - test-regression-check-node10
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Pack
+        run: npm pack --ignore-scripts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball
+          path: fast-uri-3.1.3.tgz
+          if-no-files-found: error
