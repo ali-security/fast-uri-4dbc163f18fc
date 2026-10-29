@@ -265,6 +265,10 @@ function canonicalizeHost (parsed, options, schemeHandler, isIP) {
     !options.unicodeSupport &&
     (!schemeHandler || !schemeHandler.unicodeSupport) &&
     parsed.host &&
+    // A bracketed IP literal (RFC 3986 `IP-literal`) is never a reg-name, so it
+    // must not be handed to the WHATWG hostname parser. An unterminated "[" is
+    // not a literal and is still validated as a reg-name below.
+    !isIPLiteral(parsed.host) &&
     (options.domainHost || (schemeHandler && schemeHandler.domainHost)) &&
     isIP === false &&
     nonSimpleDomain(parsed.host)
@@ -382,9 +386,9 @@ function parseWithStatus (uri, opts) {
         const bracketedIPLiteral = isIPLiteral(parsed.host)
         const hasIPLiteralBracket = parsed.host.indexOf('[') !== -1 || parsed.host.indexOf(']') !== -1
         const ipv6result = normalizeIPv6(parsed.host)
-        malformedIPLiteral = hasIPLiteralBracket && !bracketedIPLiteral
-        parsed.host = ipv6result.host.toLowerCase()
-        isIP = ipv6result.isIPV6
+        isIP = ipv6result.isIPV6 || ipv6result.isIPVFuture === true
+        malformedIPLiteral = (hasIPLiteralBracket && !bracketedIPLiteral) || (bracketedIPLiteral && ipv6result.error === true)
+        parsed.host = isIP ? ipv6result.host : ipv6result.host.toLowerCase()
 
         if (malformedIPLiteral) {
           parsed.error = parsed.error || 'URI host is malformed.'
