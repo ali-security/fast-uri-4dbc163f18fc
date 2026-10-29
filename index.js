@@ -35,6 +35,19 @@ function resolve (baseURI, relativeURI, options) {
     throw new Error(baseResult.parsed.error || relativeResult.parsed.error || 'URI is malformed.')
   }
   const resolved = resolveComponent(baseResult.parsed, relativeResult.parsed, schemelessOptions, true)
+  const resolvedSchemeHandler = getSchemeHandler((options && options.scheme) || resolved.scheme)
+  const resolvedHost = resolved.host
+  const resolvedHostIsIP = resolvedHost !== undefined && resolvedHost !== '' &&
+    (isIPv4(resolvedHost) || normalizeIPv6(resolvedHost).isIPV6)
+  canonicalizeHost(resolved, options || {}, resolvedSchemeHandler, resolvedHostIsIP)
+  // Percent escapes in an ASCII reg-name are encoded data. The WHATWG hostname
+  // parser can reject them even though fast-uri preserves them safely as RFC
+  // 3986 data. A raw non-ASCII host must still fail closed if conversion fails.
+  const encodedASCIIHost = resolvedHost && resolvedHost.indexOf('%') !== -1 &&
+    !/\P{ASCII}/u.test(resolvedHost)
+  if (resolved.error && !encodedASCIIHost) {
+    throw new Error(resolved.error)
+  }
   schemelessOptions.skipEscape = true
   return serialize(resolved, schemelessOptions)
 }
@@ -241,6 +254,29 @@ function getParseError (parsed, matches) {
 }
 
 /**
+ * @param {import('./types/index').URIComponent} parsed
+ * @param {import('./types/index').Options} options
+ * @param {{ domainHost?: boolean, unicodeSupport?: boolean }|undefined} schemeHandler
+ * @param {boolean} isIP
+ */
+function canonicalizeHost (parsed, options, schemeHandler, isIP) {
+  if (
+    !options.unicodeSupport &&
+    (!schemeHandler || !schemeHandler.unicodeSupport) &&
+    parsed.host &&
+    (options.domainHost || (schemeHandler && schemeHandler.domainHost)) &&
+    isIP === false &&
+    nonSimpleDomain(parsed.host)
+  ) {
+    try {
+      parsed.host = new URL('http://' + parsed.host).hostname
+    } catch (e) {
+      parsed.error = parsed.error || "Host's domain name can not be converted to ASCII: " + e
+    }
+  }
+}
+
+/**
  * @param {string} host
  * @returns {boolean}
  */
@@ -372,18 +408,10 @@ function parseWithStatus (uri, opts) {
     // find scheme handler
     const schemeHandler = getSchemeHandler(options.scheme || parsed.scheme)
 
-    // check if scheme can't handle IRIs
-    if (!malformedIPLiteral && !options.unicodeSupport && (!schemeHandler || !schemeHandler.unicodeSupport)) {
-      // if host component is a domain name
-      if (parsed.host && (options.domainHost || (schemeHandler && schemeHandler.domainHost)) && isIP === false && nonSimpleDomain(parsed.host)) {
-        // convert Unicode IDN -> ASCII IDN
-        try {
-          parsed.host = new URL('http://' + parsed.host).hostname
-        } catch (e) {
-          parsed.error = parsed.error || "Host's domain name can not be converted to ASCII: " + e
-        }
-      }
-      // convert IRI -> URI
+    // convert Unicode IDN -> ASCII IDN when the effective scheme uses domain hosts
+    // (a malformed IP-literal host is left as-is so it is not rewritten)
+    if (!malformedIPLiteral) {
+      canonicalizeHost(parsed, options, schemeHandler, isIP)
     }
 
     if (!schemeHandler || (schemeHandler && !schemeHandler.skipNormalize)) {
