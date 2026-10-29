@@ -26,7 +26,12 @@ function normalize (uri, options) {
  */
 function resolve (baseURI, relativeURI, options) {
   const schemelessOptions = options ? Object.assign({ scheme: 'null' }, options) : { scheme: 'null' }
-  const resolved = resolveComponent(parse(baseURI, schemelessOptions), parse(relativeURI, schemelessOptions), schemelessOptions, true)
+  const baseResult = parseWithStatus(baseURI, schemelessOptions)
+  const relativeResult = parseWithStatus(relativeURI, schemelessOptions)
+  if (baseResult.malformedIPLiteral || relativeResult.malformedIPLiteral) {
+    throw new Error('URI host is malformed.')
+  }
+  const resolved = resolveComponent(baseResult.parsed, relativeResult.parsed, schemelessOptions, true)
   schemelessOptions.skipEscape = true
   return serialize(resolved, schemelessOptions)
 }
@@ -220,9 +225,17 @@ function getParseError (parsed, matches) {
 }
 
 /**
+ * @param {string} host
+ * @returns {boolean}
+ */
+function isIPLiteral (host) {
+  return host[0] === '[' && host[host.length - 1] === ']'
+}
+
+/**
  * @param {string} uri
  * @param {import('./types/index').Options} [opts]
- * @returns {{ parsed: import('./types/index').URIComponent, malformedAuthorityOrPort: boolean }}
+ * @returns {{ parsed: import('./types/index').URIComponent, malformedAuthorityOrPort: boolean, malformedIPLiteral: boolean }}
  */
 function parseWithStatus (uri, opts) {
   const options = Object.assign({}, opts)
@@ -238,6 +251,7 @@ function parseWithStatus (uri, opts) {
   }
 
   let malformedAuthorityOrPort = false
+  let malformedIPLiteral = false
 
   let isIP = false
   if (options.reference === 'suffix') {
@@ -274,9 +288,17 @@ function parseWithStatus (uri, opts) {
     if (parsed.host) {
       const ipv4result = isIPv4(parsed.host)
       if (ipv4result === false) {
+        const bracketedIPLiteral = isIPLiteral(parsed.host)
+        const hasIPLiteralBracket = parsed.host.indexOf('[') !== -1 || parsed.host.indexOf(']') !== -1
         const ipv6result = normalizeIPv6(parsed.host)
+        malformedIPLiteral = hasIPLiteralBracket && !bracketedIPLiteral
         parsed.host = ipv6result.host.toLowerCase()
         isIP = ipv6result.isIPV6
+
+        if (malformedIPLiteral) {
+          parsed.error = parsed.error || 'URI host is malformed.'
+          malformedAuthorityOrPort = true
+        }
       } else {
         isIP = true
       }
@@ -300,7 +322,7 @@ function parseWithStatus (uri, opts) {
     const schemeHandler = getSchemeHandler(options.scheme || parsed.scheme)
 
     // check if scheme can't handle IRIs
-    if (!options.unicodeSupport && (!schemeHandler || !schemeHandler.unicodeSupport)) {
+    if (!malformedIPLiteral && !options.unicodeSupport && (!schemeHandler || !schemeHandler.unicodeSupport)) {
       // if host component is a domain name
       if (parsed.host && (options.domainHost || (schemeHandler && schemeHandler.domainHost)) && isIP === false && nonSimpleDomain(parsed.host)) {
         // convert Unicode IDN -> ASCII IDN
@@ -318,7 +340,7 @@ function parseWithStatus (uri, opts) {
         if (parsed.scheme !== undefined) {
           parsed.scheme = unescape(parsed.scheme)
         }
-        if (parsed.host !== undefined) {
+        if (parsed.host !== undefined && !malformedIPLiteral) {
           parsed.host = reescapeHostDelimiters(unescape(parsed.host), isIP)
         }
       }
@@ -341,7 +363,7 @@ function parseWithStatus (uri, opts) {
   } else {
     parsed.error = parsed.error || 'URI can not be parsed.'
   }
-  return { parsed, malformedAuthorityOrPort }
+  return { parsed, malformedAuthorityOrPort, malformedIPLiteral }
 }
 
 /**
@@ -387,7 +409,11 @@ function normalizeComparableURI (uri, opts) {
   }
 
   if (typeof uri === 'object') {
-    return serialize(uri, opts)
+    try {
+      return serialize(uri, opts)
+    } catch {
+      return undefined
+    }
   }
 }
 
