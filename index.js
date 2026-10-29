@@ -471,17 +471,20 @@ function parseWithStatus (uri, opts) {
       malformedHost = canonicalizeHost(parsed, options, schemeHandler, isIP)
     }
 
+    // An IP host was already normalized above; its only "%" is the IPv6 zone
+    // separator (with any "%25" escape consumed), so it must not be decoded again.
+    if (uri.indexOf('%') !== -1 && parsed.host !== undefined && !malformedIPLiteral && !isIP) {
+      // Decode only current unreserved escapes, once. Using unescape() here
+      // decodes every escape and lets a nested escape (e.g. %252e -> %2e -> .)
+      // reparse as a live delimiter, redirecting to a different host.
+      let host = normalizePercentEncoding(parsed.host, true)
+      // Fold reg-name case after decoding unreserved octets. The second
+      // pass only restores uppercase hex in escapes that remain encoded.
+      host = normalizePercentEncoding(host.toLowerCase())
+      parsed.host = reescapeHostDelimiters(host, isIP)
+    }
+
     if (!schemeHandler || (schemeHandler && !schemeHandler.skipNormalize)) {
-      if (uri.indexOf('%') !== -1) {
-        // An IP host was already normalized above; its only "%" is the IPv6 zone
-        // separator (with any "%25" escape consumed), so it must not be decoded again.
-        if (parsed.host !== undefined && !malformedIPLiteral && !isIP) {
-          // Decode only current unreserved escapes, once. Using unescape() here
-          // decodes every escape and lets a nested escape (e.g. %252e -> %2e -> .)
-          // reparse as a live delimiter, redirecting to a different host.
-          parsed.host = reescapeHostDelimiters(normalizePercentEncoding(parsed.host, true), isIP)
-        }
-      }
       if (parsed.path) {
         parsed.path = normalizePathEncoding(parsed.path)
       }
