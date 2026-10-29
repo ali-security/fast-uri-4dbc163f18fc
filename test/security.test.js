@@ -427,3 +427,79 @@ test('parse does not reject valid authority introducer patterns', (t) => {
     t.notOk(parsed.error, input)
   })
 })
+
+test('CVE-2026-75899: hostname normalization never decodes an escape more than once', (t) => {
+  const encodedLocalhost = 'http://%256c%256f%2563%2561%256c%2568%256f%2573%2574/'
+  const encodedLoopback = '//127%252e0%252e0%252e1/private'
+  const encodedMetadataAddress = '//169%252E254%252E169%252E254/latest/meta-data/'
+
+  t.plan(7)
+  t.equal(fastURI.normalize(encodedLocalhost), encodedLocalhost, 'nested hostname letters remain encoded')
+  t.equal(fastURI.normalize(encodedLoopback), encodedLoopback, 'nested IPv4 dots remain encoded')
+  t.equal(
+    fastURI.resolve('https://safe.example/', encodedLoopback),
+    'https://127%252e0%252e0%252e1/private',
+    'resolve does not turn nested dots into a loopback address'
+  )
+  t.equal(
+    fastURI.resolve('https://allowed.com/api/v1/', encodedMetadataAddress),
+    'https://169%252e254%252e169%252e254/latest/meta-data/',
+    'resolve does not turn nested dots into a metadata address'
+  )
+  t.equal(
+    fastURI.normalize('http://allowed.com%255Cevil.com/'),
+    'http://allowed.com%255Cevil.com/',
+    'normalize does not activate a nested backslash'
+  )
+  t.equal(
+    fastURI.serialize({ scheme: 'http', host: '%256cocalhost', path: '/' }),
+    'http://%256cocalhost/',
+    'component serialization preserves an encoded percent sign'
+  )
+  t.equal(
+    fastURI.equal(encodedLocalhost, 'http://localhost/', {}),
+    false,
+    'nested escapes do not compare equal to their twice-decoded target'
+  )
+})
+
+test('CVE-2026-75899: hostname normalization decodes only current unreserved escapes', (t) => {
+  t.plan(4)
+  t.equal(fastURI.normalize('x://%6cocalhost/'), 'x://localhost/', 'a current unreserved escape is decoded')
+  t.equal(fastURI.normalize('x://%256cocalhost/'), 'x://%256cocalhost/', 'an encoded percent is preserved')
+  t.equal(fastURI.normalize('x://host%2540evil/'), 'x://host%2540evil/', 'a nested authority delimiter stays inert')
+  t.equal(fastURI.normalize('x://%2525/'), 'x://%2525/', 'nested encoded percent signs stay encoded')
+})
+
+test('CVE-2026-75899: host conversion failures are not treated as comparable URLs', (t) => {
+  const malformedHost = 'http://trusted.test%2540evil.test/'
+
+  t.plan(3)
+  t.equal(fastURI.normalize(malformedHost), malformedHost, 'normalization preserves the failing input')
+  t.equal(fastURI.equal(malformedHost, malformedHost, {}), false, 'equal rejects a failed host conversion')
+  t.throws(
+    () => fastURI.resolve(malformedHost, 'child', { domainHost: true }),
+    /Host's domain name can not be converted to ASCII/,
+    'resolve propagates a host conversion failure'
+  )
+})
+
+test('CVE-2026-75899: IPv6 zone identifiers are not decoded after the %25 separator', (t) => {
+  const encodedZoneLoopback = 'http://[::%2531]/'
+
+  t.plan(6)
+  t.equal(fastURI.normalize(encodedZoneLoopback), encodedZoneLoopback, 'an escaped zone separator does not turn [::] into the [::1] loopback')
+  t.equal(fastURI.parse(encodedZoneLoopback).host, '::%31', 'parse keeps the zone identifier after consuming the %25 separator once')
+  t.equal(fastURI.parse('http://[fe80::1%2531]/').host, 'fe80::1%31', 'parse does not fold the zone identifier into the address')
+  t.equal(
+    fastURI.serialize({ scheme: 'http', host: 'fe80::1%31', path: '/' }),
+    'http://[fe80::1%2531]/',
+    'serialize does not decode the zone identifier of a component host'
+  )
+  t.equal(
+    fastURI.resolve('http://allowed.example/', '//[::%2531]/private'),
+    'http://[::%2531]/private',
+    'resolve does not turn an encoded zone into a loopback address'
+  )
+  t.equal(fastURI.equal(encodedZoneLoopback, 'http://[::1]/', {}), false, 'an encoded zone does not compare equal to the loopback address')
+})
