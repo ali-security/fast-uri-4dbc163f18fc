@@ -173,3 +173,93 @@ test('resolving against a relative base keeps the result relative', (t) => {
   t.equal(fastURI.serialize(fastURI.resolveComponent({ path: 'relative/base' }, { path: '../../x' })), '../x')
   t.end()
 })
+
+// A suffix reference never emits its scheme token, so it is a scheme-less
+// (path-noscheme) reference: a bare ':' in its first path segment must be
+// escaped, or the serialized output reparses as an absolute URI with a scheme.
+// @see https://github.com/fastify/fast-uri/security/advisories/GHSA-333x-w4r6-6crp
+test('suffix reference escapes a first-segment colon instead of emitting a scheme', (t) => {
+  const dangerous = /^(?:javascript|data|vbscript):/i
+  const options = { reference: 'suffix', scheme: 'x' }
+
+  for (const input of ['javascript:alert(1)', '%6Aavascript:alert(1)', 'data:text/html,x', 'vbscript:msgbox(1)']) {
+    t.notOk(dangerous.test(fastURI.normalize(input, options)), `${input} normalizes to an inert reference`)
+  }
+
+  t.equal(
+    fastURI.normalize('javascript:alert(1)', options),
+    'javascript%3Aalert%281%29',
+    'escapes the leading-segment colon to %3A'
+  )
+  t.notOk(
+    dangerous.test(fastURI.resolve('https://a.example/base/', '%6Aavascript:alert(1)', { reference: 'suffix' })),
+    'resolve in suffix mode does not emit a live scheme'
+  )
+
+  // legitimate suffix usage is unchanged
+  t.equal(fastURI.normalize('path/to/file', options), 'path/to/file', 'plain path unchanged')
+  t.equal(fastURI.normalize('a/b:c', options), 'a/b:c', 'colon in a later segment stays literal')
+  t.end()
+})
+
+test('scheme-less output without dot-segment removal cannot emit a scheme', (t) => {
+  // absolutePath (and skipEscape, used by resolve()) skip the dot-segment
+  // removal that would otherwise keep a colon-first segment behind "./", so
+  // the path-noscheme encoding must be applied on its own.
+  const dangerous = /^(?:javascript|data|vbscript):/i
+  const inputs = ['javascript:alert(1)', '%6Aavascript:alert(1)', 'data:text/html,x', 'vbscript:msgbox(1)']
+  const optionSets = [
+    { reference: 'suffix', scheme: 'x', absolutePath: true },
+    { reference: 'suffix', scheme: 'x', absolutePath: true, skipEscape: true },
+    { reference: 'suffix', scheme: 'x', skipEscape: true }
+  ]
+  for (const options of optionSets) {
+    for (const input of inputs) {
+      const normalized = fastURI.normalize(input, options)
+      const label = `${input} with ${JSON.stringify(options)} -> ${normalized}`
+      t.notOk(dangerous.test(normalized), `${label} is inert`)
+      t.equal(fastURI.parse(normalized).scheme, undefined, `${label} reparses without a scheme`)
+    }
+  }
+
+  t.equal(
+    fastURI.serialize({ scheme: 'x', path: 'javascript:alert(1)' }, { reference: 'suffix', absolutePath: true }),
+    'javascript%3Aalert%281%29',
+    'suffix serialize escapes the first-segment colon'
+  )
+  t.equal(
+    fastURI.serialize({ path: 'javascript:alert(1)' }, { skipEscape: true, absolutePath: true }),
+    'javascript%3Aalert(1)',
+    'skipEscape serialize escapes the first-segment colon'
+  )
+  t.equal(
+    fastURI.serialize({ scheme: '', path: 'javascript:alert(1)' }, { absolutePath: true }),
+    'javascript%3Aalert%281%29',
+    'an empty, unemitted scheme does not expose the first-segment colon'
+  )
+  t.equal(
+    fastURI.serialize({ scheme: 'urn', nid: 'javascript', nss: 'alert(1)' }, { reference: 'suffix', absolutePath: true }),
+    'javascript%3Aalert(1)',
+    'a suffix URN does not emit its NID as a scheme'
+  )
+  for (const ref of ['javascript:alert(1)', '%6Aavascript:alert(1)']) {
+    const resolved = fastURI.resolve('https://a.example/base/', ref, { reference: 'suffix', absolutePath: true })
+    t.equal(resolved, 'javascript%3Aalert(1)', `suffix resolve of ${ref} escapes the first-segment colon`)
+    t.equal(fastURI.parse(resolved).scheme, undefined, `suffix resolve of ${ref} reparses without a scheme`)
+  }
+  t.equal(
+    fastURI.equal({ scheme: '', path: 'javascript:alert(1)' }, 'javascript:alert(1)', { absolutePath: true }),
+    false,
+    'a scheme-less reference does not compare equal to a scheme-bearing URI'
+  )
+  t.end()
+})
+
+test('path-noscheme encoding leaves emitted schemes, later segments and root paths alone', (t) => {
+  t.equal(fastURI.normalize('x:a:b'), 'x:a:b', 'colon after an emitted scheme stays literal')
+  t.equal(fastURI.serialize({ scheme: 'x', path: 'a:b/c:d' }, { absolutePath: true }), 'x:a:b/c:d')
+  t.equal(fastURI.serialize({ path: 'a/b:c' }, { skipEscape: true, absolutePath: true }), 'a/b:c', 'later-segment colon stays literal')
+  t.equal(fastURI.serialize({ path: '/a:b' }, { skipEscape: true, absolutePath: true }), '/a:b', 'root-relative path is unchanged')
+  t.equal(fastURI.normalize('a/../a:b', { reference: 'suffix', scheme: 'x' }), './a:b', 'a "./"-protected colon stays literal')
+  t.end()
+})
